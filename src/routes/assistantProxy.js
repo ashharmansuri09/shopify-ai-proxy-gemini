@@ -1,19 +1,19 @@
 import express from 'express';
 import { verifyShopifyAppProxy } from '../middleware/verifyAppProxy.js';
 import { fetchActiveProducts } from '../services/shopifyAdmin.js';
-// ✅ Isko geminiService karein
 import { getAIRecommendations } from '../services/geminiService.js';
 
 const router = express.Router();
 
 const extractBudgetLimit = (text) => {
+  if (!text) return null;
   const match =
     text.match(/(?:under|below|andar|less than|upto|₹|rs\.?)\s*(\d+)/i) ||
     text.match(/(\d+)\s*(?:ke andar|se kam|inr|rs)/i);
   return match ? parseInt(match[1], 10) : null;
 };
 
-// GET routes to avoid "Cannot GET" errors in browser
+// GET routes for health & browser tests
 router.get('/', (req, res) => {
   res.status(200).json({
     success: true,
@@ -30,16 +30,36 @@ router.get('/recommend', (req, res) => {
   });
 });
 
+// Explicit OPTIONS preflight for direct fetch testing
+router.options('/recommend', (req, res) => {
+  res.status(200).end();
+});
+
 // Core POST recommendation logic
 router.post('/recommend', verifyShopifyAppProxy, async (req, res) => {
   try {
-    const { prompt } = req.body;
+    const prompt = req.body?.prompt;
     if (!prompt || typeof prompt !== 'string' || !prompt.trim()) {
-      return res.status(400).json({ success: false, message: 'Valid prompt is required.' });
+      return res.status(400).json({ 
+        success: false, 
+        message: 'Valid prompt is required in request body.' 
+      });
     }
 
     const budgetLimit = extractBudgetLimit(prompt);
-    const catalog = await fetchActiveProducts(budgetLimit);
+
+    // 1. Fetch products from Shopify GraphQL
+    let catalog = [];
+    try {
+      catalog = await fetchActiveProducts(budgetLimit);
+    } catch (shopifyErr) {
+      console.error('Shopify Admin Fetch Error:', shopifyErr);
+      return res.status(500).json({
+        success: false,
+        message: 'Shopify catalog fetch failed.',
+        details: shopifyErr.message
+      });
+    }
 
     if (!catalog || !catalog.length) {
       return res.json({
@@ -49,22 +69,37 @@ router.post('/recommend', verifyShopifyAppProxy, async (req, res) => {
       });
     }
 
-    const aiResult = await getAIRecommendations(prompt.trim(), catalog);
+    // 2. Run Gemini Recommendation
+    let aiResult;
+    try {
+      aiResult = await getAIRecommendations(prompt.trim(), catalog);
+    } catch (geminiErr) {
+      console.error('Gemini Service Error:', geminiErr);
+      return res.status(500).json({
+        success: false,
+        message: 'Gemini AI service failed.',
+        details: geminiErr.message
+      });
+    }
+
+    // 3. Match Products
+    const recommendedIds = aiResult?.recommendedProductIds || [];
     const matchedProducts = catalog.filter((item) =>
-      aiResult.recommendedProductIds?.includes(item.id)
+      recommendedIds.includes(item.id)
     );
 
     return res.json({
       success: true,
-      message: aiResult.assistantMessage,
-      products: matchedProducts,
+      message: aiResult?.assistantMessage || 'Here are some recommendations for you:',
+      products: matchedProducts.length > 0 ? matchedProducts : catalog.slice(0, 3),
     });
+
   } catch (error) {
-    console.error('Proxy Error:', error);
+    console.error('Proxy Unexpected Error:', error);
     return res.status(500).json({
       success: false,
-      message: 'Service unavailable. Please try again in a moment.',
-      error: process.env.NODE_ENV === 'development' ? error.message : undefined,
+      message: 'Service error',
+      details: error.message,
     });
   }
 });
