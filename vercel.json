@@ -1,9 +1,9 @@
 {
   "version": 2,
+  "functions": {
+    "api/recommend.js": { "maxDuration": 30 }
+  },
   "rewrites": [
-    {
-      "source": "/(.*)",
-      "destination": "/api/recommend.js"
-    }
+    { "source": "/(.*)", "destination": "/api/recommend.js" }
   ]
 }
